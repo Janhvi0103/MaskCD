@@ -56,6 +56,49 @@ MASK2FORMER_PRETRAINED_MODEL_ARCHIVE_LIST = [
 ]
 
 
+class SimpleTransformerBackbone(nn.Module):
+    def __init__(self, img_size=224, patch_size=4, in_chans=3,
+                 embed_dim=96, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24]):
+        super().__init__()
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+
+        # Patch embedding
+        self.patch_embed = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        
+        # Single transformer encoder block (shared, for simplicity)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=4)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=4)
+
+        # Simulate hierarchical outputs with simple up/downsampling
+        self.stage_channels = [embed_dim, embed_dim*2, embed_dim*4, embed_dim*8]
+        self.channels = self.stage_channels  # for compatibility
+
+        self.proj1 = nn.Conv2d(embed_dim, self.stage_channels[0], 1)
+        self.proj2 = nn.Conv2d(embed_dim, self.stage_channels[1], 1)
+        self.proj3 = nn.Conv2d(embed_dim, self.stage_channels[2], 1)
+        self.proj4 = nn.Conv2d(embed_dim, self.stage_channels[3], 1)
+
+    def forward(self, x):
+        # x: [B, 3, H, W]
+        x = self.patch_embed(x)  # [B, C, H', W']
+        B, C, H, W = x.shape
+        x_flat = x.flatten(2).permute(2, 0, 1)  # [H'*W', B, C]
+        x_enc = self.transformer_encoder(x_flat) # [H'*W', B, C]
+        x_out = x_enc.permute(1, 2, 0).view(B, C, H, W)  # [B, C, H', W']
+
+        # Generate fake multi-scale features by pooling/downsampling
+        out1 = self.proj1(x_out)
+        out2 = self.proj2(nn.functional.avg_pool2d(x_out, 2))
+        out3 = self.proj3(nn.functional.avg_pool2d(x_out, 4))
+        out4 = self.proj4(nn.functional.avg_pool2d(x_out, 8))
+
+        # Return like Swin: tuple of (B, C_i, H_i, W_i)
+        feature_maps = (out1, out2, out3, out4)
+        return type('Obj', (object,), {'feature_maps': feature_maps, 'channels': self.stage_channels})()
+
+
 @dataclass
 class Mask2FormerPixelDecoderOutput(ModelOutput):
     """
@@ -1398,7 +1441,8 @@ class Mask2FormerPixelLevelModule(nn.Module):
         """
         super().__init__()
         #Hierarchical transformer-based Siamese encoder 
-        self.encoder = AutoBackbone.from_config(config.backbone_config)
+        # self.encoder = AutoBackbone.from_config(config.backbone_config)
+        self.encoder = SimpleTransformerBackbone()
         feature_channels=[x*2 for x in self.encoder.channels]
         # self.decoder = Mask2FormerPixelDecoder(config, feature_channels=self.encoder.channels)
         self.decoder = Mask2FormerPixelDecoder(config, feature_channels=feature_channels)
